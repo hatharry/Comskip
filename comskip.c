@@ -128,6 +128,7 @@ int audio_channels;
 extern int xPos,yPos,lMouseDown;
 
 extern int framenum_infer;
+extern void list_codes;
 
 extern int64_t headerpos;
 int				vo_init_done = 0;
@@ -175,7 +176,7 @@ int debug_cur_segment;
 frame_info*			frame = NULL;
 long				frame_count = 0;
 long				max_frame_count;
-double				fps = 22.0;						// frames per second (NTSC=29.970, PAL=25)
+double				fps = 1.0;						// frames per second (NTSC=29.970, PAL=25)
 
 double get_frame_pts(int f) {
     if (!frame) {
@@ -448,6 +449,8 @@ int	dominant_ac;
 
 int                     thread_count = 2;
 int                     hardware_decode = 0;
+int                     use_cuvid = 0;
+int                     use_vdpau = 0;
 int						skip_B_frames = 0;
 int						lowres = 0;
 bool					live_tv = false;
@@ -902,6 +905,7 @@ char *				FindString(char* str1, char* str2, char *v);
 void				AddIniString( char *s);
 char*				intSecondsToStrMinutes(int seconds);
 char*				dblSecondsToStrMinutes(double seconds);
+char*				dblSecondsToStrMinutesFrames(double seconds);
 FILE*				LoadSettings(int argc, char ** argv);
 int					GetAvgBrightness(void);
 bool				CheckFrameIsBlack(void);
@@ -6113,7 +6117,7 @@ void OpenOutputFiles()
 //			fclose(zoomplayer_chapter_file);
         }
     }
-    
+
     if (output_scf)
     {
         sprintf(filename, "%s.scf", outbasename);
@@ -6786,7 +6790,7 @@ void OutputCommercialBlock(int i, long prev, long start, long end, bool last)
       fprintf(scf_file, "CHAPTER%02iNAME=%s\n", i * 2 + 2, "Commercial ends");
     }
     CLOSEOUTFILE(scf_file);
-    
+
     if (ffmeta_file) {
         if (prev != -1 && prev < start) {
             fprintf(ffmeta_file, "[CHAPTER]\nTIMEBASE=1/100\nSTART=%" PRIu64 "\nEND=%" PRIu64 "\ntitle=Show Segment\n", (uint64_t)(get_frame_pts(prev+1) * 100), (uint64_t)(get_frame_pts(start) * 100));
@@ -6819,8 +6823,8 @@ void OutputCommercialBlock(int i, long prev, long start, long end, bool last)
     {
         if (start < 5)
             start = 0;
-        fprintf(vdr_file, "%s start\n",	dblSecondsToStrMinutes(get_frame_pts(start)));
-        fprintf(vdr_file, "%s end\n", dblSecondsToStrMinutes(get_frame_pts(end)));
+        fprintf(vdr_file, "%s start\n",	dblSecondsToStrMinutesFrames(get_frame_pts(start)));
+        fprintf(vdr_file, "%s end\n", dblSecondsToStrMinutesFrames(get_frame_pts(end)));
     }
     CLOSEOUTFILE(vdr_file);
 
@@ -8338,6 +8342,18 @@ char* dblSecondsToStrMinutes(double seconds)
     return (tempString);
 }
 
+char* dblSecondsToStrMinutesFrames(double seconds)
+{
+    int minutes, hours;
+    hours = (int)(seconds / 3600);
+    seconds -= hours * 60 * 60;
+    minutes = (int)(seconds / 60);
+    seconds -= minutes * 60;
+    sprintf(tempString, "%0i:%.2i:%.2d.%.2d", hours, minutes, (int)seconds, (int)(((int)((seconds - (int)(seconds))*100.0)) * fps / 100.0));
+
+    return (tempString);
+}
+
 
 
 void LoadIniFile()
@@ -8659,6 +8675,9 @@ FILE* LoadSettings(int argc, char ** argv)
     struct arg_lit*		cl_quiet				= arg_lit0("q", "quiet", "Not output logging to the console window");
     struct arg_lit*		cl_demux				= arg_lit0("m", "demux", "Demux the input into elementary streams");
     struct arg_lit*		cl_hwassist				= arg_lit0(NULL, "hwassist", "Activate Hardware Assisted video decoding");
+    struct arg_lit*		cl_use_cuvid			= arg_lit0(NULL, "cuvid", "Use NVIDIA Video Decoder (CUVID), if available");
+    struct arg_lit*		cl_use_vdpau			= arg_lit0(NULL, "vdpau", "Use NVIDIA Video Decode and Presentation API (VDPAU), if available");
+    struct arg_lit*		cl_list_decoders		= arg_lit0(NULL, "decoders", "List all decoders and exit");
     struct arg_int*		cl_threads				= arg_int0(NULL, "threads", "<int>", "The number of threads to use");
     struct arg_int*		cl_verbose				= arg_intn("v", "verbose", NULL, 0, 1, "Verbose level");
     struct arg_file*	cl_ini					= arg_filen(NULL, "ini", NULL, 0, 1, "Ini file to use");
@@ -8685,6 +8704,9 @@ FILE* LoadSettings(int argc, char ** argv)
         cl_output_plist,
         cl_demux,
         cl_hwassist,
+        cl_use_cuvid,
+        cl_use_vdpau,
+        cl_list_decoders,
         cl_threads,
         cl_pid,
         cl_ts,
@@ -8768,6 +8790,11 @@ FILE* LoadSettings(int argc, char ** argv)
     }
 
     nerrors = arg_parse(argc, argv, argtable);
+    if (cl_list_decoders->count) 
+    {
+        list_codecs();
+        exit(2);
+    }    
     if (cl_help->count)
     {
         printf("Usage:\n  comskip ");
@@ -9132,6 +9159,16 @@ FILE* LoadSettings(int argc, char ** argv)
     {
         hardware_decode = 1;
     }
+    if (cl_use_cuvid->count)
+    {
+        printf("Enabling use_cuvid\n");        
+        use_cuvid = 1;
+    }
+    if (cl_use_vdpau->count)
+    {
+        printf("Enabling use_vdpau\n");        
+        use_vdpau = 1;
+    }    
 
     if (cl_threads->count)
     {
@@ -9956,7 +9993,10 @@ void LoadCutScene(const char *filename)
                 b += cutscene[i][j];
             // csbrightness[i] = b/c;
             cutscenes++;
-            fclose(cutscene_file);
+        }
+        else
+        {
+            Debug(1, "ERROR: Loading from cutfile \"%s\" failed\n", c, filename);
         }
         fclose(cutscene_file);
     } else
@@ -15556,7 +15596,7 @@ int DetermineCCTypeForBlock(long start, long end)
             {
                 if ((cc_block[i - 1].type == PAINTON) && (cc_block[i].type == POPON))
                 {
-                    type = COMMERCIAL;
+ //                   type = COMMERCIAL;
                     break;
                 }
             }
@@ -15568,7 +15608,7 @@ int DetermineCCTypeForBlock(long start, long end)
                         (F2L(cc_block[i - 1].end_frame, cc_block[i - 1].start_frame) <= 1.5) &&
                         (cc_block[i].type == POPON))
                 {
-                    type = COMMERCIAL;
+ //                   type = COMMERCIAL;
                     break;
                 }
             }
@@ -16117,29 +16157,37 @@ void set_fps(double fp,double dfps, int ticks, double rfps, double afps)
 {
     double old_fps = fps;
     static int showed_fps=0;
+    static int fps_correction_count = 0;
     fps = (double)1.0 / fp;
     if (fps != old_fps)
         showed_fps=0.0;
     if (fabs(old_fps-fps) > 0.01 /* && showed_fps++ < 4 */ ) {
-        Debug(1, "Frame Rate set to %5.3f f/s\n", fps);
-        if (ticks > 1)
-            Debug(1, "Ticks per frame = %d\n", ticks);
-        if ((fabs(fps - dfps) > 0.1)) {
-            Debug(1, "DFps[%d]= %5.3f f/s\n", ticks, dfps);
+        if (fps_correction_count++ > 4) {
+            Debug(1, "Frame Rate set to %5.3f f/s\n", fps);
+            if (ticks > 1)
+                Debug(1, "Ticks per frame = %d\n", ticks);
+            if ((fabs(fps - dfps) > 0.1)) {
+                Debug(1, "DFps[%d]= %5.3f f/s\n", ticks, dfps);
+            }
+            if (fabs(fps - rfps) > 0.1) {
+                Debug(1, "RFps[%d]= %5.3f f/s\n", ticks, rfps);
+            }
+            if (fabs(fps - afps) > 0.1) {
+                Debug(1, "AFps[%d]= %5.3f f/s\n", ticks, afps);
+            }
+            if ( fps < 9.0 || fps > 100 )
+            {
+                fps = dfps;
+                if (/* old_fps != fps && */ showed_fps < 4)
+                    Debug(1, "Frame Rate corrected to %5.3f f/s\n", fps);
+            }
+
         }
-        if (fabs(fps - rfps) > 0.1) {
-            Debug(1, "RFps[%d]= %5.3f f/s\n", ticks, rfps);
-        }
-        if (fabs(fps - afps) > 0.1) {
-            Debug(1, "AFps[%d]= %5.3f f/s\n", ticks, afps);
-        }
+
     }
-    if ( fps < 9.0 || fps > 100 )
-    {
-        fps = dfps;
-        if (/* old_fps != fps && */ showed_fps < 4)
-        Debug(1, "Frame Rate corrected to %5.3f f/s\n", fps);
-    }
+    else
+        fps_correction_count = 0;
+
 
 }
 /* no longer used
