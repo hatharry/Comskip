@@ -1,6 +1,8 @@
 *.o
 /comskip
 /comskip.exe
+/comskip-x86.exe
+/comskip-x64.exe
 /comskip-gui
 /comskip-gui.exe
 /comskip.depend
@@ -11,7 +13,8 @@
 /votest.exe
 /*.dSYM
 /ccextratorwin/.dirstamp
-
+/sandbox/
+/argtable2-13/
 # Autotools stuff
 .deps
 Makefile
